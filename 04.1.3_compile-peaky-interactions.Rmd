@@ -1,0 +1,169 @@
+---
+title: "04.1.3"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup 
+
+```{r}
+"%&%" <- function(a,b) paste0(a,b)
+library("data.table")
+library("tidyverse")
+library("GenomicRanges")
+local.dir <- "/Users/jasont/science/projects/wtsa/promoter_driven/"
+rescomp.dir <- "/Users/jasont/science/servers/FUSE5/"
+work.dir <- rescomp.dir %&% "projects/wtsa/promoter_driven/"
+peaky.dir <- work.dir %&% "peaky_interactions/"
+```
+
+Capture Compare directories/files 
+
+```{r}
+# promoter capture files 
+prom.cc.file  <- work.dir %&% "03_CaptureCompare/capture-compare-input_hg38.txt"
+prom.cc.dir  <- work.dir %&% "03_CaptureCompare/T2D_Promoter_cis_analysis/"
+```
+
+Read hg19 dpnII fragment file 
+
+```{r}
+dpn.df <- fread(prom.cc.dir %&% "6_PeakyInputs/hg38_dpnII_Fragments_key.bed",
+                header=TRUE)
+```
+
+## Functions for creating interaction output files 
+
+```{r}
+extract_all_interactions <- function(cc.df,peaky.file,
+                                     experiment="promoter",
+                                     celltype="Endo"){
+  pky.df <- fread(peaky.file)
+  if (dim(pky.df)[1]>0){
+    bait.id <- pky.df$baitID %>% unique(.)
+    bait.df <- filter(dpn.df,ID==bait.id)
+    cap.df <- filter(cc.df,V2=="chr"%&%bait.df$chrom,
+                V3==bait.df$chromStart-2)
+    capture <- cap.df$V1
+    seqnames <- cap.df$V2
+    vp <- cap.df$V3 %>% as.integer()
+    out.df <- c()
+    prey.df <- filter(dpn.df,ID %in% pky.df$preyID)
+    prey.df$start <- prey.df$chromStart -2
+    prey.df$end <- end <- prey.df$chromEnd + 2
+    prey.df$width <- abs(prey.df$end-prey.df$start)
+    build.df <- dplyr::select(prey.df,
+        one_of("ID","chrom","chromStart","chromEnd","start","end","width"))
+    names(build.df)[1:2] <- c("preyID","seqnames")
+    build.df$seqnames <- "chr" %&% build.df$seqnames
+    build.df$experiment <- experiment;build.df$celltype<-celltype
+    build.df$capture <- capture;build.df$viewpoint<-vp
+    out.df <- dplyr::left_join(pky.df,build.df,by="preyID")
+    return(out.df)    
+  } else{
+    return(NULL)
+  }
+}
+# DD used 0.01 as cutoff for rjmcmc_pos significance value 
+extract_sig_interactions <- function(res.df){
+  res.df$dist.from.vp.abs <- purrr::map(1:dim(res.df)[1],function(i){
+    row.df <- res.df[i,]
+    vp <- res.df$viewpoint %>% unique(.)
+    v <- c(row.df$start,row.df$end)
+    min(abs(v-vp))
+  }) %>% as.numeric(.)
+  sig.prox.df <- filter(res.df,dist.from.vp.abs<= 2.5e+05,rjmcmc_pos>=0.01)
+  sig.dist.df <- filter(res.df,dist.from.vp.abs > 2.5e+05,rjmcmc_pos>=0.10)
+  sig.df <- rbind(sig.prox.df,sig.dist.df)
+  sig.df <- select(sig.df,one_of("experiment","celltype","capture","seqnames",
+                        "start","end","width","rjmcmc_pos","N"))
+  if (dim(sig.df)[1]>0){
+    out.df <- c()
+    for (i in 1:dim(sig.df)[1]){
+      #print(i)
+      row.df <- sig.df[i,]
+      vp <- res.df$viewpoint %>% unique(.)
+      v <- c(row.df$start,row.df$end)
+      dist.from.vp.abs <- min(abs(v-vp))
+      type <- ifelse(dist.from.vp.abs <= 2.5e+05,"proximal","distal")
+      sign.val <- unique(sign(v-vp))
+      if (length(sign.val)==1){
+        dist.from.vp <- unique(sign(v-vp)) * dist.from.vp.abs
+      } else{
+        dist.from.vp <- c(v-vp)[grepl(v-vp,pattern=dist.from.vp.abs)]
+      }
+      row.df$dist.from.vp <- dist.from.vp
+      row.df$type <- type 
+      out.df <- rbind(out.df,row.df)
+    }
+    return(out.df)    
+  } else{
+    return(NULL)
+  }
+}
+```
+
+
+```{r}
+
+consolidate_experiment_results <- function(cc.file,peaky.file.dir,
+                                           exper="promoter"){
+  #cc.df <- fread(cc.file,fill=TRUE,sep="\t",sep2=" ",header=FALSE)
+  cc.df <- read.table(file=cc.file,header=FALSE)
+  peaky.file.vec <- list.files(peaky.file.dir) #c("promoter-capture.856876.peaky-output.txt")#
+  peaky.file.vec <- peaky.file.vec[grepl("peaky-output",peaky.file.vec)]
+  out.df1 <- c()
+  out.df2 <- c() 
+  #pb <- txtProgressBar(min=0,max=length(peaky.file.vec))
+  for (i in 1:length(peaky.file.vec)){
+    #setTxtProgressBar(pb,i)
+    print(i)
+    peaky.file <- peaky.file.dir %&% peaky.file.vec[i]
+    #print(peaky.file)
+    res.df <- extract_all_interactions(cc.df,peaky.file,experiment=exper,
+                                        celltype="Endo")
+    if (is.null(res.df)==FALSE){
+      out.df1 <- rbind(out.df1,res.df)
+      sig.df <- extract_sig_interactions(res.df)
+      if (is.null(sig.df)==FALSE){
+        out.df2 <- rbind(out.df2,sig.df)
+      } else{
+        print("No significant interactions for file: " %&% peaky.file.vec[i])
+      }
+    }
+  }
+  return(list(out.df1,out.df2))
+}
+
+```
+
+## Promoter-capture
+
+rjmcmc.pos threshold >= 0.01
+```{r}
+prom.list <- consolidate_experiment_results(prom.cc.file,
+                                            peaky.dir %&% "promoter-capture/")
+write.table(x=prom.list[[1]],file=peaky.dir%&%
+  "promoter_endo_peaky-output.txt",
+            sep="\t",quote=F,row.names=F)
+write.table(x=prom.list[[2]],file=peaky.dir%&%
+  "promoter_endo_peaky-interactions.txt",
+            sep="\t",quote=F,row.names=F)
+```
+
+## Promoter-capture (Chain)
+
+rjmcmc.pos threshold >= 0.01
+```{r}
+prom.list <- consolidate_experiment_results(prom.cc.file, peaky.dir %&%
+                                      "promoter-capture/chain_2/")
+write.table(x=prom.list[[1]],file=peaky.dir%&%
+  "promoter_endo_peaky-output_chain-2.txt",
+            sep="\t",quote=F,row.names=F)
+write.table(x=prom.list[[2]],file=peaky.dir%&%
+  "promoter_endo_peaky-interactions_chain-2.txt",
+            sep="\t",quote=F,row.names=F)
+```

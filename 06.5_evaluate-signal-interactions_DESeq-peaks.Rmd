@@ -1,0 +1,78 @@
+---
+title: "06.5"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup 
+
+```{r}
+"%&%" <- function(a,b) paste0(a,b)
+library("data.table");library("tidyverse");library("viridis")
+serv.dir <- "/Users/jasont/science/servers/FUSE5/"
+work.dir <- serv.dir %&% "projects/wtsa/promoter_driven/"
+table.dir <-"/Users/jasont/science/projects/wtsa/"%&%
+  "promoter_driven/result_tables/"
+tab.df <- fread(table.dir%&%"copied_variant_columns.txt",
+                header=F,sep="\t") # From Table S4
+names(tab.df)<-c("locus","cap.gene","gwas.snp","gwas.snp.pos",
+                 "esnp","esnp.pos")
+```
+
+```{r}
+library(GenomicRanges)
+dseq.df <- fread(work.dir%&%"DESeq2_interactions/"%&%
+                   "promoter_endo_DESeq2-interactions.txt")
+dseq.gr <- GRanges(seqnames=dseq.df$seqnames,
+    IRanges(start=dseq.df$start,end=dseq.df$end))
+gr.list <- list()
+gr.list[[1]]<-dseq.gr
+name.vec <- c("deseq2")
+```
+
+
+```{r}
+out.df <-c() 
+for (i in 1:nrow(tab.df)){
+  row.df <- tab.df[i,]
+  print(row.df)
+  snp.vec <- c(row.df$gwas.snp.pos,row.df$esnp.pos)%>%unique(.)
+  snp.gr <- c()
+  for (snp in snp.vec){
+    v <- strsplit(x=snp,split=":")[[1]]
+    build.gr <- GRanges(seqnames=v[1],
+      IRanges(start=as.integer(v[2]),end=as.integer(v[2])))
+    snp.gr <- append(snp.gr,build.gr)
+  }
+  newrow.df <- row.df
+  for (e in 1:length(name.vec)){
+    nme <- name.vec[e]
+    eval <- (snp.gr %over% gr.list[[e]]) %>% 
+      purrr::map(.,function(l){
+        ifelse(l==TRUE,"Yes","No")
+      }) %>% as.character(.)
+    eval <- paste0(eval,collapse="/")
+    b.df <- data.frame(eval,stringsAsFactors = F)
+    names(b.df)<-nme
+    newrow.df <- cbind(newrow.df,b.df)
+  }
+  out.df <- rbind(out.df,newrow.df)
+}
+```
+
+```{r}
+write.table(x=out.df,file=table.dir%&%"gwas-esnp-DESeq2-overlap.csv",
+            sep=",",quote=F,row.names=F,col.names=T)
+```
+
+Note: this region showed differential interaction in endos, encompassing 
+rs28505901 at GPMS1 locus:
+chr9 136346450-136347758
+Specifically in the capture of gene DNLZ
+
+```{r}
+filter(dseq.df,seqnames=="chr9",start==136346450,end==136347758)
+```
